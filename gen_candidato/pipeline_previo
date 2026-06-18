@@ -1,0 +1,160 @@
+"""Lectura de los archivos generados por el pipeline de diseño de primers.
+ lee dos archivos opcionales producidos por el pipeline previo:
+
+    primers.tab
+        Contiene información de los primers diseñados para cada gen:
+        nombre, secuencia de primers, Tm fw, Ta fw, Tm rv, Ta rv, tamaño.
+
+    res_enzimas.tab
+        Contiene el análisis de sitios de restricción por amplicón:
+        nombre del amplicón, enzima, sitio, cantidad de veces que aparece.
+
+Si alguno de los archivos no está disponible, el pipeline continúa sin esa
+información (los campos correspondientes quedarán como None).
+
+Formato esperado de primers.tab (separado por tabulaciones):
+    Nombre_gen  Seq_primer_fw  Tm_fw  Ta_fw  Seq_primer_rv  Tm_rv  Ta_rv  Tamaño_producto_pb
+
+Formato esperado de res_enzimas.tab (separado por tabulaciones):
+    Amplicón  Enzima  Sitio  Cantidad
+"""
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class InfoPrimers:
+    """
+    Información de primers para un gen, extraída de primers.tab.
+    gen_id    : Nombre/ID del gen.
+    tm_fw     : Temperatura de melting del primer forward (°C).
+    tm_rv     : Temperatura de melting del primer reverse (°C).
+    tamaño_pb : Tamaño del amplicón en pares de bases.
+    """
+    gen_id:    str
+    tm_fw:     float
+    tm_rv:     float
+    tamaño_pb: int
+
+
+@dataclass
+class InfoRestriccion:
+    """Información de sitios de restricción para un amplicón.
+    gen_id           : Nombre del gen (sin el prefijo "Amplicón_").
+    sitios_EcoRI     : Número de sitios EcoRI en el amplicón.
+    sitios_BamHI     : Número de sitios BamHI en el amplicón.
+    sitios_AvaII     : Número de sitios AvaII en el amplicón.
+    total_sitios     : Suma total de sitios de todas las enzimas.
+    """
+    gen_id:       str
+    sitios_EcoRI: int = 0
+    sitios_BamHI: int = 0
+    sitios_AvaII: int = 0
+    total_sitios: int = 0
+
+
+def leer_primers(ruta_tab: str) -> dict[str, InfoPrimers]:
+    """Lee primers.tab y devuelve un diccionario con la info de primers por gen. Se omite encabezado. 
+    devuelve:
+    dict[str, InfoPrimers]
+        Clave: nombre del gen.
+        Valor: InfoPrimers con Tm y tamaño.
+    """
+    datos: dict[str, InfoPrimers] = {}
+
+    if not os.path.isfile(ruta_tab):
+        print(f"[pipeline_previo] primers.tab no encontrado en: {ruta_tab}")
+        return datos
+
+    with open(ruta_tab) as archivo:
+        next(archivo, None)  # saltar encabezado
+        for numero, linea in enumerate(archivo, start=2):
+            linea = linea.strip()
+            if not linea:
+                continue
+            campos = linea.split("\t")
+            if len(campos) < 8:
+                print(f"[pipeline_previo] Línea {numero} de primers.tab ignorada.")
+                continue
+            try:
+                gen_id    = campos[0]
+                tm_fw     = float(campos[2])
+                tm_rv     = float(campos[5])
+                tamaño_pb = int(campos[7])
+                datos[gen_id] = InfoPrimers(
+                    gen_id=gen_id,
+                    tm_fw=tm_fw,
+                    tm_rv=tm_rv,
+                    tamaño_pb=tamaño_pb,
+                )
+            except ValueError as e:
+                print(f"[pipeline_previo] Error en línea {numero} de primers.tab: {e}")
+
+    print(f"[pipeline_previo] primers.tab: {len(datos)} genes cargados.")
+    return datos
+
+
+def leer_restriccion(ruta_tab: str) -> dict[str, InfoRestriccion]:
+    """Lee res_enzimas.tab y devuelve los sitios de restricción por gen.
+
+    El archivo tiene una fila por combinación (amplicón, enzima).
+    Los ID de los amplicones tienen formato "Amplicón_NOMBRE_GEN",
+    por lo que se extrae el nombre del gen removiendo ese prefijo.
+    """
+    datos: dict[str, InfoRestriccion] = {}
+
+    if not os.path.isfile(ruta_tab):
+        print(f"[pipeline_previo] res_enzimas.tab no encontrado en: {ruta_tab}")
+        return datos
+
+    with open(ruta_tab) as archivo:
+        next(archivo, None)  # saltar encabezado
+        for numero, linea in enumerate(archivo, start=2):
+            linea = linea.strip()
+            if not linea:
+                continue
+            campos = linea.split("\t")
+            if len(campos) < 4:
+                print(f"[pipeline_previo] Línea {numero} de res_enzimas.tab ignorada.")
+                continue
+            try:
+                nombre_amplicon = campos[0]
+                enzima          = campos[1]
+                cantidad        = int(campos[3])
+
+                # Extraer nombre del gen desde "Amplicón_NOMBRE_TAMAÑO"
+                gen_id = _extraer_gen_de_amplicon(nombre_amplicon)
+
+                if gen_id not in datos:
+                    datos[gen_id] = InfoRestriccion(gen_id=gen_id)
+
+                if enzima == "EcoRI":
+                    datos[gen_id].sitios_EcoRI += cantidad
+                elif enzima == "BamHI":
+                    datos[gen_id].sitios_BamHI += cantidad
+                elif enzima == "AvaII":
+                    datos[gen_id].sitios_AvaII += cantidad
+
+            except ValueError as e:
+                print(f"[pipeline_previo] Error en línea {numero} de res_enzimas.tab: {e}")
+
+    # Calcular total de sitios para cada gen
+    for info in datos.values():
+        info.total_sitios = info.sitios_EcoRI + info.sitios_BamHI + info.sitios_AvaII
+
+    print(f"[pipeline_previo] res_enzimas.tab: {len(datos)} amplicones cargados.")
+    return datos
+
+
+def _extraer_gen_de_amplicon(nombre_amplicon: str) -> str:
+    """
+    Extrae el nombre del gen desde el identificador de amplicón. Si el formato no coincide, devuelve el string original.
+    """
+    # Remover prefijo "Amplicón_" y el sufijo "_TAMAÑO" (último "_número")
+    import re
+    # Remueve el prefijo
+    sin_prefijo = re.sub(r"^Amplicón_", "", nombre_amplicon)
+    # Remueve el sufijo numérico al final (ej: "_450")
+    sin_sufijo  = re.sub(r"_\d+$", "", sin_prefijo)
+    return sin_sufijo if sin_sufijo else nombre_amplicon
